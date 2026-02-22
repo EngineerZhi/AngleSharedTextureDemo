@@ -1,0 +1,10 @@
+build/
+.vs/
+*.user
+*.exe
+*.pdb
+*.ilk
+*.obj
+third_party/ffmpeg/
+res_test/
+buid/
