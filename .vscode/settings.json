@@ -1,0 +1,11 @@
+{
+    "cmake.configureArgs": [
+        "-DANGLE_DIR=${workspaceFolder}/third_party/angle"
+    ],
+    "cmake.generator": "Visual Studio 17 2022",
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "files.associations": {
+        "*.h": "cpp",
+        "*.cpp": "cpp"
+    }
+}

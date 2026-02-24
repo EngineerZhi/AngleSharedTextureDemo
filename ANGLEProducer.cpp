@@ -1,16 +1,14 @@
 /**
  * ANGLEProducer.cpp
- *
- * ANGLE (OpenGL ES) 侧实现：
- *   1. 初始化 EGL + 查询 ANGLE 内部 D3D11 设备
- *   2. 用 ANGLE 设备创建带 KeyedMutex 的共享纹理
- *   3. 通过 EGL_D3D_TEXTURE_ANGLE 将纹理包装为 PBuffer（GL 渲染目标）
- *   4. 每帧用 GLSL 渲染渐变色，通过 KeyedMutex 与消费方同步
+ * ANGLE 渲染到共享纹理
  */
 
 #include "SharedTextureDemo.h"
 #include <cmath>
 #include <cstdio>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "third_party/stb/stb_image.h"
 
 // -----------------------------------------------------------------------
 // EGL 扩展函数指针（需运行时获取）
@@ -108,29 +106,58 @@ ID3D11Device* AngleEGLContext::QueryInternalD3DDevice() const {
 // -----------------------------------------------------------------------
 static const char* s_vsSource = R"(
 attribute vec2 aPos;
-varying   vec2 vUV;
+varying vec2 vUV;
 void main() {
     vUV = aPos * 0.5 + 0.5;
     gl_Position = vec4(aPos, 0.0, 1.0);
 }
 )";
 
-// 根据 UV 坐标 + 色相画出渐变
-static const char* s_fsSource = R"(
+static const char* s_fsGradient = R"(
 precision mediump float;
 varying vec2 vUV;
-uniform float uHue;  // 0.0 ~ 1.0
-
-vec3 hsv2rgb(vec3 c) {
-    vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
-    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+void main() {
+    gl_FragColor = vec4(vUV.x, vUV.y, 0.5, 1.0);
 }
+)";
+
+static const char* s_fsRoundedCorner = R"(
+precision mediump float;
+varying vec2 vUV;
+uniform sampler2D uTexture;
+uniform float uCornerRadius;
+uniform vec2 uResolution;
 
 void main() {
-    float h = mod(uHue + vUV.x * 0.3 + vUV.y * 0.2, 1.0);
-    vec3  rgb = hsv2rgb(vec3(h, 0.85, 0.9));
-    gl_FragColor = vec4(rgb, 1.0);
+    vec2 pixelCoord = vUV * uResolution;
+    float radius = uCornerRadius;
+    
+    float alpha = 1.0;
+    
+    vec2 topLeft = vec2(radius, radius);
+    vec2 topRight = vec2(uResolution.x - radius, radius);
+    vec2 bottomLeft = vec2(radius, uResolution.y - radius);
+    vec2 bottomRight = vec2(uResolution.x - radius, uResolution.y - radius);
+    
+    if (pixelCoord.x < radius && pixelCoord.y < radius) {
+        float dist = distance(pixelCoord, topLeft);
+        alpha = 1.0 - smoothstep(radius - 1.0, radius, dist);
+    }
+    else if (pixelCoord.x > uResolution.x - radius && pixelCoord.y < radius) {
+        float dist = distance(pixelCoord, topRight);
+        alpha = 1.0 - smoothstep(radius - 1.0, radius, dist);
+    }
+    else if (pixelCoord.x < radius && pixelCoord.y > uResolution.y - radius) {
+        float dist = distance(pixelCoord, bottomLeft);
+        alpha = 1.0 - smoothstep(radius - 1.0, radius, dist);
+    }
+    else if (pixelCoord.x > uResolution.x - radius && pixelCoord.y > uResolution.y - radius) {
+        float dist = distance(pixelCoord, bottomRight);
+        alpha = 1.0 - smoothstep(radius - 1.0, radius, dist);
+    }
+    
+    vec4 texColor = texture2D(uTexture, vUV);
+    gl_FragColor = vec4(texColor.rgb, texColor.a * alpha);
 }
 )";
 
@@ -141,12 +168,12 @@ static GLuint CompileShader(GLenum type, const char* src) {
     GLint ok = 0;
     glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
     if (!ok) {
-        char log[512];
+        char log[1024];
         glGetShaderInfoLog(s, sizeof(log), nullptr, log);
-        char msg[600];
-        snprintf(msg, sizeof(msg), "Shader compile error: %s", log);
+        printf("[ANGLE] Shader compile failed (type=%d):\n%s\n", type, log);
+        printf("[ANGLE] Shader source:\n%s\n", src);
         glDeleteShader(s);
-        throw std::runtime_error(msg);
+        throw std::runtime_error(std::string("Shader compile error: ") + log);
     }
     return s;
 }
@@ -157,23 +184,17 @@ static GLuint CompileShader(GLenum type, const char* src) {
 void ANGLEProducer::Init(const SharedTextureDesc& desc) {
     m_desc = desc;
 
-    // 1. 初始化 EGL
     m_egl.Init();
 
-    // 2. 获取 ANGLE 内部 D3D 设备
     m_angleDevice = m_egl.QueryInternalD3DDevice();
     if (!m_angleDevice) {
         throw std::runtime_error("Failed to get ANGLE internal D3D11 device");
     }
     printf("[ANGLE] Internal D3D11 device: %p\n", (void*)m_angleDevice);
 
-    // 3. 用 ANGLE 设备创建共享纹理
     _CreateSharedTexture();
-
-    // 4. 创建 EGL PBuffer Surface（将 D3D 纹理包装为 GL 渲染目标）
     _CreatePBufferSurface();
 
-    // 5. 激活 Context，创建 GL 资源
     eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
     EGL_CHECK(eglGetError() == EGL_SUCCESS, "eglMakeCurrent");
 
@@ -193,17 +214,14 @@ void ANGLEProducer::_CreateSharedTexture() {
     td.SampleDesc.Count = 1;
     td.Usage     = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    // SHARED_KEYEDMUTEX: 同进程跨设备共享 + 同步支持
     td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
 
     HRESULT hr = m_angleDevice->CreateTexture2D(&td, nullptr, &m_sharedTex);
     HR_CHECK(hr, "CreateTexture2D (shared)");
 
-    // 获取 KeyedMutex 接口
     hr = m_sharedTex->QueryInterface(IID_PPV_ARGS(&m_keyedMutex));
     HR_CHECK(hr, "QueryInterface IDXGIKeyedMutex");
 
-    // 获取 Legacy Share Handle（同进程传值即可）
     IDXGIResource* dxgiRes = nullptr;
     hr = m_sharedTex->QueryInterface(IID_PPV_ARGS(&dxgiRes));
     HR_CHECK(hr, "QueryInterface IDXGIResource");
@@ -211,12 +229,19 @@ void ANGLEProducer::_CreateSharedTexture() {
     hr = dxgiRes->GetSharedHandle(&m_shareHandle);
     dxgiRes->Release();
     HR_CHECK(hr, "GetSharedHandle");
+    
+    hr = m_keyedMutex->AcquireSync(0, 0);
+    if (SUCCEEDED(hr)) {
+        m_keyedMutex->ReleaseSync(0);
+        printf("[ANGLE] KeyedMutex initialized to key=0\n");
+    } else {
+        printf("[ANGLE] KeyedMutex initial state unknown\n");
+    }
 
     printf("[ANGLE] Shared texture created, handle=%p\n", m_shareHandle);
 }
 
 void ANGLEProducer::_CreatePBufferSurface() {
-    // 验证 EGL_ANGLE_d3d_texture_client_buffer 扩展
     const char* exts = eglQueryString(m_egl.display, EGL_EXTENSIONS);
     if (!strstr(exts, "EGL_ANGLE_d3d_texture_client_buffer")) {
         throw std::runtime_error("Missing EGL_ANGLE_d3d_texture_client_buffer");
@@ -225,12 +250,9 @@ void ANGLEProducer::_CreatePBufferSurface() {
     const EGLint pbAttribs[] = {
         EGL_WIDTH,          static_cast<EGLint>(m_desc.width),
         EGL_HEIGHT,         static_cast<EGLint>(m_desc.height),
-        EGL_TEXTURE_TARGET, EGL_TEXTURE_2D,
-        EGL_TEXTURE_FORMAT, EGL_TEXTURE_RGBA,
         EGL_NONE
     };
 
-    // 直接用 D3D11 纹理指针作为 ClientBuffer
     m_pbuffer = eglCreatePbufferFromClientBuffer(
         m_egl.display,
         EGL_D3D_TEXTURE_ANGLE,
@@ -243,12 +265,13 @@ void ANGLEProducer::_CreatePBufferSurface() {
 }
 
 void ANGLEProducer::_CompileShaders() {
-    GLuint vs = CompileShader(GL_VERTEX_SHADER,   s_vsSource);
-    GLuint fs = CompileShader(GL_FRAGMENT_SHADER, s_fsSource);
+    GLuint vs = CompileShader(GL_VERTEX_SHADER, s_vsSource);
+    GLuint fsGrad = CompileShader(GL_FRAGMENT_SHADER, s_fsGradient);
+    GLuint fsRounded = CompileShader(GL_FRAGMENT_SHADER, s_fsRoundedCorner);
 
     m_program = glCreateProgram();
     glAttachShader(m_program, vs);
-    glAttachShader(m_program, fs);
+    glAttachShader(m_program, fsGrad);
     glBindAttribLocation(m_program, 0, "aPos");
     glLinkProgram(m_program);
 
@@ -257,17 +280,32 @@ void ANGLEProducer::_CompileShaders() {
     if (!ok) {
         char log[512];
         glGetProgramInfoLog(m_program, sizeof(log), nullptr, log);
-        glDeleteProgram(m_program);
-        glDeleteShader(vs);
-        glDeleteShader(fs);
+        printf("[ANGLE] Gradient program link error: %s\n", log);
         throw std::runtime_error(std::string("Program link error: ") + log);
     }
+    
+    m_roundedProgram = glCreateProgram();
+    glAttachShader(m_roundedProgram, vs);
+    glAttachShader(m_roundedProgram, fsRounded);
+    glBindAttribLocation(m_roundedProgram, 0, "aPos");
+    glLinkProgram(m_roundedProgram);
+    
+    glGetProgramiv(m_roundedProgram, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(m_roundedProgram, sizeof(log), nullptr, log);
+        printf("[ANGLE] Rounded program link error: %s\n", log);
+        throw std::runtime_error(std::string("Rounded program link error: ") + log);
+    }
+    
+    printf("[ANGLE] Shaders compiled: gradient=%u, rounded=%u\n", m_program, m_roundedProgram);
+    
     glDeleteShader(vs);
-    glDeleteShader(fs);
+    glDeleteShader(fsGrad);
+    glDeleteShader(fsRounded);
 }
 
 void ANGLEProducer::_CreateQuadVBO() {
-    // 全屏三角形对（NDC 坐标）
     const float verts[] = {
         -1.f, -1.f,   1.f, -1.f,   -1.f,  1.f,
         -1.f,  1.f,   1.f, -1.f,    1.f,  1.f,
@@ -279,22 +317,90 @@ void ANGLEProducer::_CreateQuadVBO() {
     GL_CHECK("CreateQuadVBO");
 }
 
-void ANGLEProducer::RenderFrame(float hue) {
-    // 获取 KeyedMutex（等待消费方用完，初始 key=0）
-    HRESULT hr = m_keyedMutex->AcquireSync(0, 5000);
-    HR_CHECK(hr, "KeyedMutex AcquireSync(0) [producer]");
+void ANGLEProducer::LoadImageFromFile(const char* path) {
+    int width, height, channels;
+    unsigned char* data = stbi_load(path, &width, &height, &channels, 4);
+    if (!data) {
+        throw std::runtime_error(std::string("Failed to load image: ") + path);
+    }
+    
+    EGLBoolean result = eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+    if (!result) {
+        stbi_image_free(data);
+        throw std::runtime_error("eglMakeCurrent failed in LoadImageFromFile");
+    }
+    
+    if (m_imageTexture != 0) {
+        glDeleteTextures(1, &m_imageTexture);
+        m_imageTexture = 0;
+    }
+    
+    glGenTextures(1, &m_imageTexture);
+    GLenum err = glGetError();
+    
+    if (m_imageTexture == 0 || err != GL_NO_ERROR) {
+        stbi_image_free(data);
+        char msg[256];
+        snprintf(msg, sizeof(msg), "glGenTextures failed: ID=%u, error=0x%04X", m_imageTexture, err);
+        throw std::runtime_error(msg);
+    }
+    
+    glBindTexture(GL_TEXTURE_2D, m_imageTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    
+    glFinish();
+    
+    // 解绑EGL上下文，避免纹理状态在下次MakeCurrent时丢失
+    eglMakeCurrent(m_egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    
+    stbi_image_free(data);
+    
+    printf("[ANGLE] Image loaded: %s (%dx%d → texture ID=%u)\n", path, width, height, m_imageTexture);
+}
 
-    // --- GL 渲染 ---
+void ANGLEProducer::RenderWithRoundedCorners(float cornerRadius) {
+    if (m_imageTexture == 0) {
+        throw std::runtime_error("No image loaded! Call LoadImageFromFile() first.");
+    }
+    
+    float maxRadius = std::min(m_desc.width, m_desc.height) / 2.0f;
+    if (cornerRadius > maxRadius) {
+        printf("[ANGLE WARNING] cornerRadius=%.1f exceeds max=%.1f, clamping\n", 
+               cornerRadius, maxRadius);
+        cornerRadius = maxRadius;
+    }
+    
     eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+    
+    HRESULT hr = m_keyedMutex->AcquireSync(0, INFINITE);
+    HR_CHECK(hr, "KeyedMutex AcquireSync(0)");
 
-    glViewport(0, 0, static_cast<GLsizei>(m_desc.width),
-                      static_cast<GLsizei>(m_desc.height));
-    glClearColor(0.f, 0.f, 0.f, 1.f);
+    glViewport(0, 0, m_desc.width, m_desc.height);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glUseProgram(m_program);
-    GLint hueLoc = glGetUniformLocation(m_program, "uHue");
-    glUniform1f(hueLoc, hue);
+    glUseProgram(m_roundedProgram);
+    
+    GLint texLoc = glGetUniformLocation(m_roundedProgram, "uTexture");
+    GLint radiusLoc = glGetUniformLocation(m_roundedProgram, "uCornerRadius");
+    GLint resLoc = glGetUniformLocation(m_roundedProgram, "uResolution");
+    
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_imageTexture);
+    glUniform1i(texLoc, 0);
+    glUniform1f(radiusLoc, cornerRadius);
+    glUniform2f(resLoc, static_cast<float>(m_desc.width), static_cast<float>(m_desc.height));
+    
+    printf("[ANGLE] Rendering: resolution=(%u,%u), cornerRadius=%.1f\n",
+           m_desc.width, m_desc.height, cornerRadius);
 
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     glEnableVertexAttribArray(0);
@@ -303,21 +409,51 @@ void ANGLEProducer::RenderFrame(float hue) {
     glDisableVertexAttribArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    // 关键：确保 GPU 命令完全提交后再释放 Mutex
     glFinish();
-    GL_CHECK("RenderFrame");
+    GL_CHECK("RenderWithRoundedCorners");
 
-    // 释放 KeyedMutex，通知消费方可以读取（交接 key=1）
+    hr = m_keyedMutex->ReleaseSync(1);
+    HR_CHECK(hr, "KeyedMutex ReleaseSync(1)");
+    
+    printf("[ANGLE] Rendered with rounded corners (radius=%.1f)\n", cornerRadius);
+}
+
+void ANGLEProducer::RenderGradient() {
+    HRESULT hr = m_keyedMutex->AcquireSync(0, INFINITE);
+    HR_CHECK(hr, "KeyedMutex AcquireSync(0) [producer]");
+
+    eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+
+    glViewport(0, 0, m_desc.width, m_desc.height);
+    glClearColor(0.1f, 0.2f, 0.3f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(m_program);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glDisableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glFinish();
+    GL_CHECK("RenderGradient");
+
     hr = m_keyedMutex->ReleaseSync(1);
     HR_CHECK(hr, "KeyedMutex ReleaseSync(1) [producer]");
+    
+    printf("[ANGLE] Gradient rendered\n");
 }
 
 void ANGLEProducer::Destroy() {
     if (m_egl.display != EGL_NO_DISPLAY) {
         eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
 
-        if (m_vbo)     { glDeleteBuffers(1, &m_vbo); m_vbo = 0; }
-        if (m_program) { glDeleteProgram(m_program);  m_program = 0; }
+        if (m_imageTexture)   { glDeleteTextures(1, &m_imageTexture); m_imageTexture = 0; }
+        if (m_vbo)            { glDeleteBuffers(1, &m_vbo); m_vbo = 0; }
+        if (m_program)        { glDeleteProgram(m_program);  m_program = 0; }
+        if (m_roundedProgram) { glDeleteProgram(m_roundedProgram); m_roundedProgram = 0; }
 
         if (m_pbuffer != EGL_NO_SURFACE) {
             eglDestroySurface(m_egl.display, m_pbuffer);

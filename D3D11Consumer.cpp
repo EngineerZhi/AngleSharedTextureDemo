@@ -11,6 +11,9 @@
 #include "SharedTextureDemo.h"
 #include <cstdio>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "third_party/stb/stb_image_write.h"
+
 // -----------------------------------------------------------------------
 // D3D11Consumer 实现
 // -----------------------------------------------------------------------
@@ -88,7 +91,7 @@ void D3D11Consumer::OpenSharedTexture(HANDLE shareHandle,
 
 std::vector<uint8_t> D3D11Consumer::ConsumeFrame() {
     // 等待 ANGLE 写完（key=1 表示 Producer 已 Release）
-    HRESULT hr = m_keyedMutex->AcquireSync(1, 5000);
+    HRESULT hr = m_keyedMutex->AcquireSync(1, INFINITE);
     HR_CHECK(hr, "KeyedMutex AcquireSync(1) [consumer]");
 
     // 从 GPU 拷贝到 Staging
@@ -123,6 +126,18 @@ void D3D11Consumer::BindSRV(UINT slot) {
     if (m_srv && m_context) {
         m_context->PSSetShaderResources(slot, 1, &m_srv);
     }
+}
+
+void D3D11Consumer::SaveToPNG(const char* path) {
+    auto pixels = ConsumeFrame();
+    
+    int result = stbi_write_png(path, m_desc.width, m_desc.height, 4, 
+                                pixels.data(), m_desc.width * 4);
+    if (!result) {
+        throw std::runtime_error(std::string("Failed to save PNG: ") + path);
+    }
+    printf("[D3D11Consumer] Saved PNG: %s (%ux%u, %zu bytes)\n", 
+           path, m_desc.width, m_desc.height, pixels.size());
 }
 
 void D3D11Consumer::Destroy() {

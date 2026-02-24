@@ -91,8 +91,7 @@
 struct SharedTextureDesc {
     UINT        width  = 1280;
     UINT        height = 720;
-    // ANGLE D3D11 后端对 BGRA 原生支持最完整，优先使用
-    DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
 };
 
 // -----------------------------------------------------------------------
@@ -123,13 +122,10 @@ public:
     void Init(const SharedTextureDesc& desc);
     void Destroy();
 
-    /**
-     * 渲染一帧到共享纹理（通过 IDXGIKeyedMutex 同步）
-     * @param hue  0.0f ~ 1.0f，色相值，每帧递增产生彩色旋转效果
-     */
-    void RenderFrame(float hue);
+    void LoadImageFromFile(const char* path);
+    void RenderWithRoundedCorners(float cornerRadius);
+    void RenderGradient();
 
-    /// 获取 Legacy Share Handle，传给 D3D11Consumer
     HANDLE GetShareHandle() const { return m_shareHandle; }
 
 private:
@@ -147,6 +143,8 @@ private:
 
     GLuint m_vbo     = 0;
     GLuint m_program = 0;
+    GLuint m_roundedProgram = 0;
+    GLuint m_imageTexture = 0;
 
     SharedTextureDesc m_desc;
 };
@@ -162,16 +160,12 @@ public:
     void Init();
     void Destroy();
 
-    /// 打开来自 ANGLEProducer 的共享纹理（同进程跨 D3D 设备）
     void OpenSharedTexture(HANDLE shareHandle, const SharedTextureDesc& desc);
 
-    /**
-     * 等待 ANGLE 写完，将像素回读到 CPU
-     * @return BGRA8 原始像素，大小 = width * height * 4 字节
-     */
     std::vector<uint8_t> ConsumeFrame();
 
-    /// 将纹理以 SRV 形式绑定到 Pixel Shader（GPU 端使用示例）
+    void SaveToPNG(const char* path);
+
     void BindSRV(UINT slot = 0);
 
     ID3D11Device*        GetDevice()  const { return m_device;  }

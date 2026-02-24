@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(echo rebase failed:*)",
+      "Bash(cd /e/github/AngleSharedTextureDemo && git checkout 534f0a3 2>&1)"
+    ]
+  }
+}

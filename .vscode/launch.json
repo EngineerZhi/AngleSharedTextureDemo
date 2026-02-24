@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (MSVC)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Debug/PipelineDemo.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build/Debug",
+            "environment": [],
+            "console": "integratedTerminal",
+            "preLaunchTask": "CMake: Build"
+        },
+        {
+            "name": "Release (MSVC)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Release/ANGLESharedTextureDemo.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build/Release",
+            "environment": [],
+            "console": "integratedTerminal",
+            "preLaunchTask": "CMake: Build Release"
+        }
+    ]
+}
