@@ -27,6 +27,46 @@ set(COMMON_SOURCES
     D3D11Consumer.cpp
 )
 
+add_library(PerfettoSdk STATIC
+    perfetto-cpp-sdk-src/perfetto.cc
+)
+
+target_include_directories(PerfettoSdk PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(PerfettoSdk PRIVATE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _CRT_SECURE_NO_WARNINGS
+    $<$<CONFIG:Debug>:_DEBUG>
+)
+
+target_compile_options(PerfettoSdk PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
+    $<$<CXX_COMPILER_ID:MSVC>:/bigobj>
+    $<$<CXX_COMPILER_ID:MSVC>:/W0>
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-w>
+)
+
+add_library(DemoTracing STATIC
+    PerfettoTracing.cpp
+)
+
+target_include_directories(DemoTracing PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(DemoTracing PUBLIC
+    PerfettoSdk
+)
+
+if(WIN32)
+    target_link_libraries(PerfettoSdk PUBLIC
+        ws2_32.lib
+    )
+endif()
+
 # 单线程版本：基础示例
 add_executable(${PROJECT_NAME} ${COMMON_SOURCES} main.cpp)
 
@@ -71,6 +111,7 @@ endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ${ANGLE_EGL_LIB}
     ${ANGLE_GLES_LIB}
+    DemoTracing
     d3d11.lib
     dxgi.lib
     dxguid.lib
@@ -79,6 +120,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 target_link_libraries(PipelineDemo PRIVATE
     ${ANGLE_EGL_LIB}
     ${ANGLE_GLES_LIB}
+    DemoTracing
     d3d11.lib
     dxgi.lib
     dxguid.lib
@@ -103,11 +145,19 @@ set(COMMON_COMPILE_OPTS
     $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang>>:-fexec-charset=UTF-8>
 )
 
+set(PERFETTO_WARNING_SUPPRESSIONS
+    $<$<CXX_COMPILER_ID:MSVC>:/wd4127>
+    $<$<CXX_COMPILER_ID:MSVC>:/wd4506>
+)
+
 target_compile_definitions(${PROJECT_NAME} PRIVATE ${COMMON_COMPILE_DEFS})
-target_compile_options(${PROJECT_NAME} PRIVATE ${COMMON_COMPILE_OPTS})
+target_compile_options(${PROJECT_NAME} PRIVATE ${COMMON_COMPILE_OPTS} ${PERFETTO_WARNING_SUPPRESSIONS})
 
 target_compile_definitions(PipelineDemo PRIVATE ${COMMON_COMPILE_DEFS})
-target_compile_options(PipelineDemo PRIVATE ${COMMON_COMPILE_OPTS})
+target_compile_options(PipelineDemo PRIVATE ${COMMON_COMPILE_OPTS} ${PERFETTO_WARNING_SUPPRESSIONS})
+
+target_compile_definitions(DemoTracing PRIVATE ${COMMON_COMPILE_DEFS})
+target_compile_options(DemoTracing PRIVATE ${COMMON_COMPILE_OPTS} ${PERFETTO_WARNING_SUPPRESSIONS})
 
 # -----------------------------------------------------------------------
 # 拷贝 ANGLE DLL 到输出目录（便于直接运行）

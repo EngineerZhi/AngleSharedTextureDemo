@@ -5,6 +5,7 @@
  */
 
 #include "SharedTextureDemo.h"
+#include "PerfettoTracing.h"
 #include <cstdio>
 #include <thread>
 #include <atomic>
@@ -15,7 +16,19 @@ int main() {
     printf("ANGLE Shared Texture - Rounded Corner Demo\n");
     printf("===========================================\n");
 
+    std::string tracePath;
+
     try {
+        demo::tracing::TraceSession trace({
+            "angle_shared_texture_demo",
+            "ANGLESharedTextureDemo",
+            16384,
+        });
+        tracePath = trace.output_path();
+        demo::tracing::SetCurrentThreadName("Main Thread");
+
+        TRACE_EVENT("app", "SingleThreadDemo");
+
         SharedTextureDesc desc;
         desc.width  = 800;
         desc.height = 600;
@@ -44,8 +57,13 @@ int main() {
         printf("SUCCESS! Check output_rounded.png\n");
         printf("========================================\n");
 
+        trace.Finalize();
+
     } catch (const std::exception& e) {
         fprintf(stderr, "\n[FATAL] %s\n", e.what());
+        if (!tracePath.empty()) {
+            fprintf(stderr, "[Perfetto] Trace output path: %s\n", tracePath.c_str());
+        }
         return 1;
     }
 

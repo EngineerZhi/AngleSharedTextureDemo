@@ -13,6 +13,7 @@
 - ✅ **KeyedMutex 同步**：GPU 级别的跨线程同步机制
 - ✅ **圆角图像处理**：Shader 实现可配置圆角半径的图像裁剪
 - ✅ **双线程流水线**：Producer-Consumer 模式，支持高效批量处理
+- ✅ **Perfetto 性能追踪**：自动生成 `.pftrace`，直观看到热点与阻塞
 
 ## 技术架构
 
@@ -112,14 +113,40 @@ AngleSharedTextureDemo/
 cd build/Release
 ANGLESharedTextureDemo.exe
 ```
-输出：`output_rounded.png`（800x600，圆角半径50）
+输出：
+- `output_rounded.png`（800x600，圆角半径50）
+- `traces/angle_shared_texture_demo_*.pftrace`
 
 **双线程流水线版本**：
 ```bash
 cd build/Release
 PipelineDemo.exe
 ```
-输出：`pipeline_output_01.png` ~ `pipeline_output_05.png`（不同圆角半径）
+输出：
+- `pipeline_output_01.png` ~ `pipeline_output_05.png`（不同圆角半径）
+- `traces/pipeline_demo_*.pftrace`
+
+## Perfetto 使用方式
+
+运行任一示例后，程序会在当前工作目录下自动创建 `traces/` 目录，并写出一份 Perfetto trace 文件。
+
+打开方式：
+
+1. 打开 `https://ui.perfetto.dev`
+2. 将生成的 `.pftrace` 文件拖进去
+3. 在时间轴中查看以下热点类别：
+- `angle`：EGL 初始化、纹理上传、GL 绘制、`glFinish`
+- `d3d11`：共享纹理打开、`CopyResource`、`Map`、CPU 行拷贝
+- `io`：图片解码、PNG 编码
+- `sync`：`IDXGIKeyedMutex` 等待、线程条件变量等待
+- `pipeline`：任务队列深度、完成数量、Producer/Consumer 每任务耗时
+
+建议优先运行 `PipelineDemo.exe`，因为它会同时展示：
+
+- Producer 线程上的加载与渲染耗时
+- Consumer 线程上的读回与 PNG 编码耗时
+- `TaskQueueDepth` / `CompletedTasks` 计数器变化
+- `ProducerWaitForConsumer` / `ConsumerWaitForFrame` 这类阻塞热点
 
 ## 核心技术
 

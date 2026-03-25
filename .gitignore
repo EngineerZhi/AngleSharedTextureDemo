@@ -5,6 +5,9 @@ build/
 *.pdb
 *.ilk
 *.obj
+output_rounded.png
+pipeline_output_*.png
+traces/
 third_party/ffmpeg/
 res_test/
 buid/

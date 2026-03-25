@@ -4,6 +4,7 @@
  */
 
 #include "SharedTextureDemo.h"
+#include "PerfettoTracing.h"
 #include <cmath>
 #include <cstdio>
 
@@ -28,6 +29,8 @@ static void LoadEGLExtensions(EGLDisplay dpy) {
 // AngleEGLContext
 // -----------------------------------------------------------------------
 void AngleEGLContext::Init() {
+    TRACE_EVENT("angle", "AngleEGLContext::Init");
+
     // 使用 D3D11 后端
     const EGLint displayAttribs[] = {
         EGL_PLATFORM_ANGLE_TYPE_ANGLE,     EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE,
@@ -36,14 +39,20 @@ void AngleEGLContext::Init() {
         EGL_NONE
     };
 
-    display = eglGetPlatformDisplayEXT(
-        EGL_PLATFORM_ANGLE_ANGLE,
-        EGL_DEFAULT_DISPLAY,
-        displayAttribs);
+    {
+        TRACE_EVENT("angle", "eglGetPlatformDisplayEXT");
+        display = eglGetPlatformDisplayEXT(
+            EGL_PLATFORM_ANGLE_ANGLE,
+            EGL_DEFAULT_DISPLAY,
+            displayAttribs);
+    }
     EGL_CHECK(display != EGL_NO_DISPLAY, "eglGetPlatformDisplayEXT");
 
     EGLint major = 0, minor = 0;
-    EGL_CHECK(eglInitialize(display, &major, &minor), "eglInitialize");
+    {
+        TRACE_EVENT("angle", "eglInitialize");
+        EGL_CHECK(eglInitialize(display, &major, &minor), "eglInitialize");
+    }
 
     printf("[ANGLE] EGL version: %d.%d\n", major, minor);
 
@@ -61,16 +70,24 @@ void AngleEGLContext::Init() {
         EGL_NONE
     };
     EGLint numConfigs = 0;
-    EGL_CHECK(eglChooseConfig(display, configAttribs, &config, 1, &numConfigs)
-              && numConfigs > 0, "eglChooseConfig");
+    {
+        TRACE_EVENT("angle", "eglChooseConfig");
+        EGL_CHECK(eglChooseConfig(display, configAttribs, &config, 1, &numConfigs)
+                  && numConfigs > 0, "eglChooseConfig");
+    }
 
     // 创建 GLES2 Context
     const EGLint ctxAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctxAttribs);
+    {
+        TRACE_EVENT("angle", "eglCreateContext");
+        context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctxAttribs);
+    }
     EGL_CHECK(context != EGL_NO_CONTEXT, "eglCreateContext");
 }
 
 void AngleEGLContext::Destroy() {
+    TRACE_EVENT("angle", "AngleEGLContext::Destroy");
+
     if (display != EGL_NO_DISPLAY) {
         if (context != EGL_NO_CONTEXT) {
             eglDestroyContext(display, context);
@@ -82,6 +99,8 @@ void AngleEGLContext::Destroy() {
 }
 
 ID3D11Device* AngleEGLContext::QueryInternalD3DDevice() const {
+    TRACE_EVENT("angle", "AngleEGLContext::QueryInternalD3DDevice");
+
     if (!s_eglQueryDisplayAttribEXT || !s_eglQueryDeviceAttribEXT) {
         printf("[ANGLE] EGL_ANGLE_device_d3d extensions not available\n");
         return nullptr;
@@ -162,6 +181,8 @@ void main() {
 )";
 
 static GLuint CompileShader(GLenum type, const char* src) {
+    TRACE_EVENT("angle", "CompileShader", "shader_type", static_cast<int>(type));
+
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, nullptr);
     glCompileShader(s);
@@ -182,6 +203,10 @@ static GLuint CompileShader(GLenum type, const char* src) {
 // ANGLEProducer 实现
 // -----------------------------------------------------------------------
 void ANGLEProducer::Init(const SharedTextureDesc& desc) {
+    TRACE_EVENT("angle", "ANGLEProducer::Init",
+                "width", static_cast<int>(desc.width),
+                "height", static_cast<int>(desc.height));
+
     m_desc = desc;
 
     m_egl.Init();
@@ -205,6 +230,10 @@ void ANGLEProducer::Init(const SharedTextureDesc& desc) {
 }
 
 void ANGLEProducer::_CreateSharedTexture() {
+    TRACE_EVENT("angle", "ANGLEProducer::_CreateSharedTexture",
+                "width", static_cast<int>(m_desc.width),
+                "height", static_cast<int>(m_desc.height));
+
     D3D11_TEXTURE2D_DESC td = {};
     td.Width     = m_desc.width;
     td.Height    = m_desc.height;
@@ -216,17 +245,30 @@ void ANGLEProducer::_CreateSharedTexture() {
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     td.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
 
-    HRESULT hr = m_angleDevice->CreateTexture2D(&td, nullptr, &m_sharedTex);
+    HRESULT hr = S_OK;
+    {
+        TRACE_EVENT("angle", "D3D11::CreateTexture2D");
+        hr = m_angleDevice->CreateTexture2D(&td, nullptr, &m_sharedTex);
+    }
     HR_CHECK(hr, "CreateTexture2D (shared)");
 
-    hr = m_sharedTex->QueryInterface(IID_PPV_ARGS(&m_keyedMutex));
+    {
+        TRACE_EVENT("angle", "QueryInterface::IDXGIKeyedMutex");
+        hr = m_sharedTex->QueryInterface(IID_PPV_ARGS(&m_keyedMutex));
+    }
     HR_CHECK(hr, "QueryInterface IDXGIKeyedMutex");
 
     IDXGIResource* dxgiRes = nullptr;
-    hr = m_sharedTex->QueryInterface(IID_PPV_ARGS(&dxgiRes));
+    {
+        TRACE_EVENT("angle", "QueryInterface::IDXGIResource");
+        hr = m_sharedTex->QueryInterface(IID_PPV_ARGS(&dxgiRes));
+    }
     HR_CHECK(hr, "QueryInterface IDXGIResource");
 
-    hr = dxgiRes->GetSharedHandle(&m_shareHandle);
+    {
+        TRACE_EVENT("angle", "IDXGIResource::GetSharedHandle");
+        hr = dxgiRes->GetSharedHandle(&m_shareHandle);
+    }
     dxgiRes->Release();
     HR_CHECK(hr, "GetSharedHandle");
     
@@ -242,6 +284,8 @@ void ANGLEProducer::_CreateSharedTexture() {
 }
 
 void ANGLEProducer::_CreatePBufferSurface() {
+    TRACE_EVENT("angle", "ANGLEProducer::_CreatePBufferSurface");
+
     const char* exts = eglQueryString(m_egl.display, EGL_EXTENSIONS);
     if (!strstr(exts, "EGL_ANGLE_d3d_texture_client_buffer")) {
         throw std::runtime_error("Missing EGL_ANGLE_d3d_texture_client_buffer");
@@ -265,6 +309,8 @@ void ANGLEProducer::_CreatePBufferSurface() {
 }
 
 void ANGLEProducer::_CompileShaders() {
+    TRACE_EVENT("angle", "ANGLEProducer::_CompileShaders");
+
     GLuint vs = CompileShader(GL_VERTEX_SHADER, s_vsSource);
     GLuint fsGrad = CompileShader(GL_FRAGMENT_SHADER, s_fsGradient);
     GLuint fsRounded = CompileShader(GL_FRAGMENT_SHADER, s_fsRoundedCorner);
@@ -306,6 +352,8 @@ void ANGLEProducer::_CompileShaders() {
 }
 
 void ANGLEProducer::_CreateQuadVBO() {
+    TRACE_EVENT("angle", "ANGLEProducer::_CreateQuadVBO");
+
     const float verts[] = {
         -1.f, -1.f,   1.f, -1.f,   -1.f,  1.f,
         -1.f,  1.f,   1.f, -1.f,    1.f,  1.f,
@@ -318,13 +366,23 @@ void ANGLEProducer::_CreateQuadVBO() {
 }
 
 void ANGLEProducer::LoadImageFromFile(const char* path) {
+    TRACE_EVENT("io", "ANGLEProducer::LoadImageFromFile", "path", path);
+
     int width, height, channels;
-    unsigned char* data = stbi_load(path, &width, &height, &channels, 4);
+    unsigned char* data = nullptr;
+    {
+        TRACE_EVENT("io", "stbi_load", "path", path);
+        data = stbi_load(path, &width, &height, &channels, 4);
+    }
     if (!data) {
         throw std::runtime_error(std::string("Failed to load image: ") + path);
     }
     
-    EGLBoolean result = eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+    EGLBoolean result = EGL_FALSE;
+    {
+        TRACE_EVENT("angle", "eglMakeCurrent::LoadImage");
+        result = eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+    }
     if (!result) {
         stbi_image_free(data);
         throw std::runtime_error("eglMakeCurrent failed in LoadImageFromFile");
@@ -345,15 +403,23 @@ void ANGLEProducer::LoadImageFromFile(const char* path) {
         throw std::runtime_error(msg);
     }
     
-    glBindTexture(GL_TEXTURE_2D, m_imageTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    {
+        TRACE_EVENT("angle", "UploadImageTexture",
+                    "image_width", width,
+                    "image_height", height);
+        glBindTexture(GL_TEXTURE_2D, m_imageTexture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
     
-    glFinish();
+    {
+        TRACE_EVENT("angle", "glFinish::LoadImage");
+        glFinish();
+    }
     
     // 解绑EGL上下文，避免纹理状态在下次MakeCurrent时丢失
     eglMakeCurrent(m_egl.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -364,6 +430,11 @@ void ANGLEProducer::LoadImageFromFile(const char* path) {
 }
 
 void ANGLEProducer::RenderWithRoundedCorners(float cornerRadius) {
+    TRACE_EVENT("angle", "ANGLEProducer::RenderWithRoundedCorners",
+                "corner_radius", cornerRadius,
+                "width", static_cast<int>(m_desc.width),
+                "height", static_cast<int>(m_desc.height));
+
     if (m_imageTexture == 0) {
         throw std::runtime_error("No image loaded! Call LoadImageFromFile() first.");
     }
@@ -375,78 +446,116 @@ void ANGLEProducer::RenderWithRoundedCorners(float cornerRadius) {
         cornerRadius = maxRadius;
     }
     
-    eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+    {
+        TRACE_EVENT("angle", "eglMakeCurrent::Render");
+        eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+    }
     
-    HRESULT hr = m_keyedMutex->AcquireSync(0, INFINITE);
+    TRACE_COUNTER("angle", "CornerRadius", cornerRadius);
+
+    HRESULT hr = S_OK;
+    {
+        TRACE_EVENT("sync", "KeyedMutex::AcquireSync[producer]");
+        hr = m_keyedMutex->AcquireSync(0, INFINITE);
+    }
     HR_CHECK(hr, "KeyedMutex AcquireSync(0)");
 
-    glViewport(0, 0, m_desc.width, m_desc.height);
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    {
+        TRACE_EVENT("angle", "DrawRoundedCorners");
+        glViewport(0, 0, m_desc.width, m_desc.height);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    glUseProgram(m_roundedProgram);
-    
-    GLint texLoc = glGetUniformLocation(m_roundedProgram, "uTexture");
-    GLint radiusLoc = glGetUniformLocation(m_roundedProgram, "uCornerRadius");
-    GLint resLoc = glGetUniformLocation(m_roundedProgram, "uResolution");
-    
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_imageTexture);
-    glUniform1i(texLoc, 0);
-    glUniform1f(radiusLoc, cornerRadius);
-    glUniform2f(resLoc, static_cast<float>(m_desc.width), static_cast<float>(m_desc.height));
-    
-    printf("[ANGLE] Rendering: resolution=(%u,%u), cornerRadius=%.1f\n",
-           m_desc.width, m_desc.height, cornerRadius);
+        glUseProgram(m_roundedProgram);
+        
+        GLint texLoc = glGetUniformLocation(m_roundedProgram, "uTexture");
+        GLint radiusLoc = glGetUniformLocation(m_roundedProgram, "uCornerRadius");
+        GLint resLoc = glGetUniformLocation(m_roundedProgram, "uResolution");
+        
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, m_imageTexture);
+        glUniform1i(texLoc, 0);
+        glUniform1f(radiusLoc, cornerRadius);
+        glUniform2f(resLoc, static_cast<float>(m_desc.width), static_cast<float>(m_desc.height));
+        
+        printf("[ANGLE] Rendering: resolution=(%u,%u), cornerRadius=%.1f\n",
+               m_desc.width, m_desc.height, cornerRadius);
 
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glDisableVertexAttribArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
 
-    glFinish();
+    {
+        TRACE_EVENT("angle", "glFinish::Render");
+        glFinish();
+    }
     GL_CHECK("RenderWithRoundedCorners");
 
-    hr = m_keyedMutex->ReleaseSync(1);
+    {
+        TRACE_EVENT("sync", "KeyedMutex::ReleaseSync[producer]");
+        hr = m_keyedMutex->ReleaseSync(1);
+    }
     HR_CHECK(hr, "KeyedMutex ReleaseSync(1)");
     
     printf("[ANGLE] Rendered with rounded corners (radius=%.1f)\n", cornerRadius);
 }
 
 void ANGLEProducer::RenderGradient() {
-    HRESULT hr = m_keyedMutex->AcquireSync(0, INFINITE);
+    TRACE_EVENT("angle", "ANGLEProducer::RenderGradient");
+
+    HRESULT hr = S_OK;
+    {
+        TRACE_EVENT("sync", "KeyedMutex::AcquireSync[producer]");
+        hr = m_keyedMutex->AcquireSync(0, INFINITE);
+    }
     HR_CHECK(hr, "KeyedMutex AcquireSync(0) [producer]");
 
-    eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+    {
+        TRACE_EVENT("angle", "eglMakeCurrent::Gradient");
+        eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
+    }
 
-    glViewport(0, 0, m_desc.width, m_desc.height);
-    glClearColor(0.1f, 0.2f, 0.3f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+    {
+        TRACE_EVENT("angle", "DrawGradient");
+        glViewport(0, 0, m_desc.width, m_desc.height);
+        glClearColor(0.1f, 0.2f, 0.3f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
 
-    glUseProgram(m_program);
+        glUseProgram(m_program);
 
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
-    glDisableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glDisableVertexAttribArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
 
-    glFinish();
+    {
+        TRACE_EVENT("angle", "glFinish::Gradient");
+        glFinish();
+    }
     GL_CHECK("RenderGradient");
 
-    hr = m_keyedMutex->ReleaseSync(1);
+    {
+        TRACE_EVENT("sync", "KeyedMutex::ReleaseSync[producer]");
+        hr = m_keyedMutex->ReleaseSync(1);
+    }
     HR_CHECK(hr, "KeyedMutex ReleaseSync(1) [producer]");
     
     printf("[ANGLE] Gradient rendered\n");
 }
 
 void ANGLEProducer::Destroy() {
+    TRACE_EVENT("angle", "ANGLEProducer::Destroy");
+
     if (m_egl.display != EGL_NO_DISPLAY) {
         eglMakeCurrent(m_egl.display, m_pbuffer, m_pbuffer, m_egl.context);
 

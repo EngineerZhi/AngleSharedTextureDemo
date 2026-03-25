@@ -9,6 +9,7 @@
  */
 
 #include "SharedTextureDemo.h"
+#include "PerfettoTracing.h"
 #include <cstdio>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -18,6 +19,8 @@
 // D3D11Consumer 实现
 // -----------------------------------------------------------------------
 void D3D11Consumer::Init() {
+    TRACE_EVENT("d3d11", "D3D11Consumer::Init");
+
     UINT flags = 0;
 #ifdef _DEBUG
     flags |= D3D11_CREATE_DEVICE_DEBUG;
@@ -44,6 +47,10 @@ void D3D11Consumer::Init() {
 
 void D3D11Consumer::OpenSharedTexture(HANDLE shareHandle,
                                        const SharedTextureDesc& desc) {
+    TRACE_EVENT("d3d11", "D3D11Consumer::OpenSharedTexture",
+                "width", static_cast<int>(desc.width),
+                "height", static_cast<int>(desc.height));
+
     if (!m_device) {
         throw std::runtime_error("D3D11Consumer not initialized");
     }
@@ -90,16 +97,30 @@ void D3D11Consumer::OpenSharedTexture(HANDLE shareHandle,
 }
 
 std::vector<uint8_t> D3D11Consumer::ConsumeFrame() {
+    TRACE_EVENT("d3d11", "D3D11Consumer::ConsumeFrame",
+                "width", static_cast<int>(m_desc.width),
+                "height", static_cast<int>(m_desc.height));
+
     // 等待 ANGLE 写完（key=1 表示 Producer 已 Release）
-    HRESULT hr = m_keyedMutex->AcquireSync(1, INFINITE);
+    HRESULT hr = S_OK;
+    {
+        TRACE_EVENT("sync", "KeyedMutex::AcquireSync[consumer]");
+        hr = m_keyedMutex->AcquireSync(1, INFINITE);
+    }
     HR_CHECK(hr, "KeyedMutex AcquireSync(1) [consumer]");
 
     // 从 GPU 拷贝到 Staging
-    m_context->CopyResource(m_stagingTex, m_importedTex);
+    {
+        TRACE_EVENT("d3d11", "ID3D11DeviceContext::CopyResource");
+        m_context->CopyResource(m_stagingTex, m_importedTex);
+    }
 
     // Map 读取像素
     D3D11_MAPPED_SUBRESOURCE mapped = {};
-    hr = m_context->Map(m_stagingTex, 0, D3D11_MAP_READ, 0, &mapped);
+    {
+        TRACE_EVENT("d3d11", "ID3D11DeviceContext::Map");
+        hr = m_context->Map(m_stagingTex, 0, D3D11_MAP_READ, 0, &mapped);
+    }
     HR_CHECK(hr, "Map staging texture");
 
     const UINT pixelBytes = 4;  // BGRA8
@@ -107,16 +128,24 @@ std::vector<uint8_t> D3D11Consumer::ConsumeFrame() {
     std::vector<uint8_t> pixels(rowBytes * m_desc.height);
 
     // 处理 RowPitch 可能有 padding 的情况
-    const uint8_t* src = reinterpret_cast<const uint8_t*>(mapped.pData);
-    uint8_t*       dst = pixels.data();
-    for (UINT row = 0; row < m_desc.height; ++row) {
-        memcpy(dst + row * rowBytes, src + row * mapped.RowPitch, rowBytes);
+    {
+        TRACE_EVENT("d3d11", "CopyMappedRows",
+                    "row_pitch", static_cast<int>(mapped.RowPitch),
+                    "row_bytes", static_cast<int>(rowBytes));
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(mapped.pData);
+        uint8_t*       dst = pixels.data();
+        for (UINT row = 0; row < m_desc.height; ++row) {
+            memcpy(dst + row * rowBytes, src + row * mapped.RowPitch, rowBytes);
+        }
     }
 
     m_context->Unmap(m_stagingTex, 0);
 
     // 归还 KeyedMutex（key=0，通知 Producer 可以写下一帧）
-    hr = m_keyedMutex->ReleaseSync(0);
+    {
+        TRACE_EVENT("sync", "KeyedMutex::ReleaseSync[consumer]");
+        hr = m_keyedMutex->ReleaseSync(0);
+    }
     HR_CHECK(hr, "KeyedMutex ReleaseSync(0) [consumer]");
 
     return pixels;
@@ -129,10 +158,18 @@ void D3D11Consumer::BindSRV(UINT slot) {
 }
 
 void D3D11Consumer::SaveToPNG(const char* path) {
+    TRACE_EVENT("io", "D3D11Consumer::SaveToPNG", "path", path);
+
     auto pixels = ConsumeFrame();
     
-    int result = stbi_write_png(path, m_desc.width, m_desc.height, 4, 
+    int result = 0;
+    {
+        TRACE_EVENT("io", "stbi_write_png",
+                    "width", static_cast<int>(m_desc.width),
+                    "height", static_cast<int>(m_desc.height));
+        result = stbi_write_png(path, m_desc.width, m_desc.height, 4,
                                 pixels.data(), m_desc.width * 4);
+    }
     if (!result) {
         throw std::runtime_error(std::string("Failed to save PNG: ") + path);
     }
@@ -141,6 +178,8 @@ void D3D11Consumer::SaveToPNG(const char* path) {
 }
 
 void D3D11Consumer::Destroy() {
+    TRACE_EVENT("d3d11", "D3D11Consumer::Destroy");
+
     if (m_keyedMutex) { m_keyedMutex->Release(); m_keyedMutex  = nullptr; }
     if (m_srv)        { m_srv->Release();         m_srv         = nullptr; }
     if (m_stagingTex) { m_stagingTex->Release();  m_stagingTex  = nullptr; }

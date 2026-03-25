@@ -9,6 +9,7 @@
  */
 
 #include "SharedTextureDemo.h"
+#include "PerfettoTracing.h"
 #include <cstdio>
 #include <thread>
 #include <mutex>
@@ -30,6 +31,9 @@ public:
     ~PipelineProcessor() { Stop(); }
 
     void Init(const SharedTextureDesc& desc) {
+        TRACE_EVENT("pipeline", "PipelineProcessor::Init",
+                    "width", static_cast<int>(desc.width),
+                    "height", static_cast<int>(desc.height));
         m_desc = desc;
         m_stopFlag = false;
         m_frameReady = false;
@@ -37,6 +41,8 @@ public:
     }
 
     void Start() {
+        TRACE_EVENT("pipeline", "PipelineProcessor::Start");
+
         // 启动生产者线程（ANGLE 渲染）
         m_producerThread = std::thread(&PipelineProcessor::ProducerThreadFunc, this);
         
@@ -54,12 +60,22 @@ public:
         task.cornerRadius = cornerRadius;
         task.taskId = m_totalTasks++;
         m_taskQueue.push(task);
+        const int queueDepth = static_cast<int>(m_taskQueue.size());
         m_taskCV.notify_one();
+
+        TRACE_EVENT("pipeline", "PipelineProcessor::AddTask",
+                    "task_id", task.taskId,
+                    "corner_radius", cornerRadius,
+                    "queue_depth", queueDepth,
+                    "input", inputPath,
+                    "output", outputPath);
+        TRACE_COUNTER("pipeline", "TaskQueueDepth", queueDepth);
         
         printf("[Pipeline] Task #%d queued: %s -> %s\n", task.taskId, inputPath.c_str(), outputPath.c_str());
     }
 
     void Stop() {
+        TRACE_EVENT("pipeline", "PipelineProcessor::Stop");
         m_stopFlag = true;
         m_taskCV.notify_all();
         m_frameCV.notify_all();
@@ -69,6 +85,8 @@ public:
     }
 
     void WaitForCompletion() {
+        TRACE_EVENT("pipeline", "PipelineProcessor::WaitForCompletion",
+                    "total_tasks", m_totalTasks);
         // 等待所有任务完成
         while (m_completedCount < m_totalTasks) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -81,6 +99,8 @@ public:
 
 private:
     void ProducerThreadFunc() {
+        demo::tracing::SetCurrentThreadName("Producer Thread");
+        TRACE_EVENT("pipeline", "ProducerThreadFunc");
         printf("[Producer] Thread started\n");
 
         try {
@@ -104,40 +124,55 @@ private:
                 // 获取任务
                 {
                     std::unique_lock<std::mutex> lock(m_taskMutex);
-                    m_taskCV.wait(lock, [this] { 
-                        return m_stopFlag || !m_taskQueue.empty(); 
-                    });
+                    {
+                        TRACE_EVENT("sync", "ProducerWaitForTask");
+                        m_taskCV.wait(lock, [this] { 
+                            return m_stopFlag || !m_taskQueue.empty(); 
+                        });
+                    }
 
                     if (m_stopFlag && m_taskQueue.empty()) break;
                     if (m_taskQueue.empty()) continue;
 
                     task = m_taskQueue.front();
                     m_taskQueue.pop();
+                    TRACE_COUNTER("pipeline", "TaskQueueDepth", static_cast<int>(m_taskQueue.size()));
                 }
 
                 printf("[Producer] Processing task #%d: %s\n", task.taskId, task.inputPath.c_str());
 
-                // 加载图像
-                producer.LoadImageFromFile(task.inputPath.c_str());
-
-                // 渲染圆角效果
-                producer.RenderWithRoundedCorners(task.cornerRadius);
-
-                // 通知消费者新帧已就绪
                 {
-                    std::lock_guard<std::mutex> lock(m_frameMutex);
-                    m_frameReady = true;
-                    m_currentTaskId = task.taskId;
-                    m_currentOutputPath = task.outputPath;
-                }
-                m_frameCV.notify_one();
+                    TRACE_EVENT("pipeline", "ProducerProcessTask",
+                                "task_id", task.taskId,
+                                "corner_radius", task.cornerRadius,
+                                "input", task.inputPath);
 
-                printf("[Producer] Task #%d rendered, waiting for consumer...\n", task.taskId);
+                    // 加载图像
+                    producer.LoadImageFromFile(task.inputPath.c_str());
 
-                // 等待消费者完成（确保KeyedMutex已归还到key=0）
-                {
-                    std::unique_lock<std::mutex> lock(m_frameMutex);
-                    m_frameCV.wait(lock, [this] { return !m_frameReady || m_stopFlag; });
+                    // 渲染圆角效果
+                    producer.RenderWithRoundedCorners(task.cornerRadius);
+
+                    // 通知消费者新帧已就绪
+                    {
+                        std::lock_guard<std::mutex> lock(m_frameMutex);
+                        m_frameReady = true;
+                        m_currentTaskId = task.taskId;
+                        m_currentOutputPath = task.outputPath;
+                    }
+                    TRACE_COUNTER("pipeline", "FrameReadyFlag", 1);
+                    m_frameCV.notify_one();
+
+                    printf("[Producer] Task #%d rendered, waiting for consumer...\n", task.taskId);
+
+                    // 等待消费者完成（确保KeyedMutex已归还到key=0）
+                    {
+                        std::unique_lock<std::mutex> lock(m_frameMutex);
+                        {
+                            TRACE_EVENT("sync", "ProducerWaitForConsumer");
+                            m_frameCV.wait(lock, [this] { return !m_frameReady || m_stopFlag; });
+                        }
+                    }
                 }
                 if (m_stopFlag) break;
             }
@@ -152,6 +187,8 @@ private:
     }
 
     void ConsumerThreadFunc() {
+        demo::tracing::SetCurrentThreadName("Consumer Thread");
+        TRACE_EVENT("pipeline", "ConsumerThreadFunc");
         printf("[Consumer] Thread started\n");
 
         try {
@@ -159,7 +196,10 @@ private:
             HANDLE shareHandle;
             {
                 std::unique_lock<std::mutex> lock(m_shareMutex);
-                m_shareCV.wait(lock, [this] { return m_shareHandleReady; });
+                {
+                    TRACE_EVENT("sync", "ConsumerWaitForShareHandle");
+                    m_shareCV.wait(lock, [this] { return m_shareHandleReady; });
+                }
                 shareHandle = m_shareHandle;
             }
 
@@ -177,9 +217,12 @@ private:
                 // 等待新帧
                 {
                     std::unique_lock<std::mutex> lock(m_frameMutex);
-                    m_frameCV.wait(lock, [this] { 
-                        return m_stopFlag || m_frameReady; 
-                    });
+                    {
+                        TRACE_EVENT("sync", "ConsumerWaitForFrame");
+                        m_frameCV.wait(lock, [this] { 
+                            return m_stopFlag || m_frameReady; 
+                        });
+                    }
 
                     if (m_stopFlag && !m_frameReady) break;
                     if (!m_frameReady) continue;
@@ -190,10 +233,17 @@ private:
 
                 printf("[Consumer] Saving task #%d: %s\n", taskId, outputPath.c_str());
 
-                // 保存 PNG
-                consumer.SaveToPNG(outputPath.c_str());
+                {
+                    TRACE_EVENT("pipeline", "ConsumerProcessTask",
+                                "task_id", taskId,
+                                "output", outputPath);
+
+                    // 保存 PNG
+                    consumer.SaveToPNG(outputPath.c_str());
+                }
 
                 m_completedCount++;
+                TRACE_COUNTER("pipeline", "CompletedTasks", m_completedCount.load());
                 printf("[Consumer] Task #%d saved (%d/%d completed)\n", 
                        taskId, m_completedCount.load(), m_totalTasks);
 
@@ -202,6 +252,7 @@ private:
                     std::lock_guard<std::mutex> lock(m_frameMutex);
                     m_frameReady = false;
                 }
+                TRACE_COUNTER("pipeline", "FrameReadyFlag", 0);
                 m_frameCV.notify_one();
             }
 
@@ -248,7 +299,19 @@ int main() {
     printf("Producer Thread (ANGLE) + Consumer Thread (D3D11)\n");
     printf("=========================================\n\n");
 
+    std::string tracePath;
+
     try {
+        demo::tracing::TraceSession trace({
+            "pipeline_demo",
+            "PipelineDemo",
+            32768,
+        });
+        tracePath = trace.output_path();
+        demo::tracing::SetCurrentThreadName("Main Thread");
+
+        TRACE_EVENT("app", "PipelineDemoMain");
+
         SharedTextureDesc desc;
         desc.width = 800;
         desc.height = 600;
@@ -282,8 +345,13 @@ int main() {
         printf("Average: %.2f ms/image\n", (float)duration.count() / pipeline.GetTotalTasks());
         printf("=========================================\n");
 
+        trace.Finalize();
+
     } catch (const std::exception& e) {
         fprintf(stderr, "\n[FATAL] %s\n", e.what());
+        if (!tracePath.empty()) {
+            fprintf(stderr, "[Perfetto] Trace output path: %s\n", tracePath.c_str());
+        }
         return 1;
     }
 
